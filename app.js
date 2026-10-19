@@ -5,68 +5,64 @@ let apps = [];     // edu_apps
 let courses = [];  // edu_courses
 
 // ===== 저장 위치 =====
-// 데이터를 읽고 쓰는 곳은 이 네 함수뿐이다.
-// 저장 위치를 바꿀 때는 이 부분만 고치면 된다.
-const KEY_APPS = 'edu_apps';
-const KEY_COURSES = 'edu_courses';
+// Supabase 호출은 이 네 함수 안에서만 한다.
+let db;
 
-function seedData() {
-  const now = Date.now();
-  const at = i => now - (10 - i) * 60000; // 신청 순서 기록용 (표시에는 안 씀)
-  courses = [
-    { course: '정보보안 기본', capacity: 5 },
-    { course: '생성형 AI 실무', capacity: 5 },
-    { course: '보고서 작성 기초', capacity: 5 },
-  ];
-  apps = [
-    { id: 1, course: '정보보안 기본', date: '2026-09-24', hours: 3, name: '김가상', team: '기획팀', status: '이수', createdAt: at(1) },
-    { id: 2, course: '정보보안 기본', date: '2026-09-24', hours: 3, name: '이가상', team: '안전팀', status: '이수', createdAt: at(2) },
-    { id: 3, course: '정보보안 기본', date: '2026-09-24', hours: 3, name: '박가상', team: '운영팀', status: '취소', createdAt: at(3) },
-    { id: 4, course: '생성형 AI 실무', date: '2026-10-16', hours: 7, name: '김가상', team: '기획팀', status: '신청', createdAt: at(4) },
-    { id: 5, course: '생성형 AI 실무', date: '2026-10-16', hours: 7, name: '최가상', team: '안전팀', status: '신청', createdAt: at(5) },
-    { id: 6, course: '생성형 AI 실무', date: '2026-10-16', hours: 7, name: '정가상', team: '운영팀', status: '신청', createdAt: at(6) },
-    { id: 7, course: '생성형 AI 실무', date: '2026-10-16', hours: 7, name: '한가상', team: '기획팀', status: '신청', createdAt: at(7) },
-    { id: 8, course: '보고서 작성 기초', date: '2026-11-05', hours: 4, name: '오가상', team: '운영팀', status: '신청', createdAt: at(8) },
-  ];
-  saveAll();
-}
-
-function saveAll() {
-  localStorage.setItem(KEY_APPS, JSON.stringify(apps));
-  localStorage.setItem(KEY_COURSES, JSON.stringify(courses));
-}
-
-// 전체 불러오기
+// 전체 불러오기: 두 표가 모두 도착한 뒤 화면용 데이터를 교체한다.
 async function loadData() {
-  try {
-    apps = JSON.parse(localStorage.getItem(KEY_APPS)) || [];
-    courses = JSON.parse(localStorage.getItem(KEY_COURSES)) || [];
-  } catch (e) {
-    apps = []; courses = [];
+  if (!db) {
+    if (typeof supabase === 'undefined') {
+      throw new Error('Supabase 라이브러리를 불러오지 못했습니다. 인터넷 연결을 확인해 주세요.');
+    }
+    if (typeof SUPABASE_URL === 'undefined' || typeof SUPABASE_KEY === 'undefined'
+        || !SUPABASE_URL || !SUPABASE_KEY) {
+      throw new Error('config.js에 Supabase 주소와 공개용 키를 입력해 주세요.');
+    }
+    db = supabase.createClient(SUPABASE_URL, SUPABASE_KEY, {
+      auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false },
+    });
   }
-  if (apps.length === 0) seedData();
+  const [appResult, courseResult] = await Promise.all([
+    db.from('edu_apps').select('id,course,date,hours,name,team,status,created_at')
+      .order('date').order('created_at').order('id'),
+    db.from('edu_courses').select('course,capacity').order('course'),
+  ]);
+  if (appResult.error) throw appResult.error;
+  if (courseResult.error) throw courseResult.error;
+  const nextApps = appResult.data.map(({ created_at, ...app }) => ({
+    ...app, createdAt: new Date(created_at).getTime(),
+  }));
+  apps = nextApps;
+  courses = courseResult.data;
 }
 
-// 신청 1건 저장 (과정이 처음이면 정원 5명으로 함께 등록)
+// 신청 내용만 전송한다. 자동 번호·초기 상태·과정 등록은 DB가 맡는다.
 async function insertApp(app) {
-  const nextId = apps.reduce((m, a) => Math.max(m, a.id), 0) + 1;
-  apps.push({ ...app, id: nextId, createdAt: Date.now() });
-  if (!courses.some(c => c.course === app.course)) courses.push({ course: app.course, capacity: DEFAULT_CAPACITY });
-  saveAll();
+  if (!db) await loadData();
+  const { course, date, hours, name, team } = app;
+  const { error } = await db.from('edu_apps').insert({ course, date, hours, name, team });
+  if (error) throw error;
+  await loadData();
 }
 
-// 상태 변경 저장
+// 상태 칸만 변경한다.
 async function updateStatus(id, newStatus) {
-  const app = apps.find(a => a.id === id);
-  if (app) app.status = newStatus;
-  saveAll();
+  if (!db) await loadData();
+  const { data, error } = await db.from('edu_apps').update({ status: newStatus })
+    .eq('id', id).select('id');
+  if (error) throw error;
+  if (data.length !== 1) throw new Error('변경할 신청을 찾지 못했습니다. 새로 불러와 주세요.');
+  await loadData();
 }
 
-// 정원 변경 저장
+// 기존 과정의 정원 칸만 변경한다.
 async function updateCapacity(course, capacity) {
-  const c = courses.find(x => x.course === course);
-  if (c) c.capacity = capacity; else courses.push({ course, capacity });
-  saveAll();
+  if (!db) await loadData();
+  const { data, error } = await db.from('edu_courses').update({ capacity })
+    .eq('course', course).select('course');
+  if (error) throw error;
+  if (data.length !== 1) throw new Error('변경할 과정을 찾지 못했습니다. 새로 불러와 주세요.');
+  await loadData();
 }
 // ===== 저장 위치 끝 =====
 
